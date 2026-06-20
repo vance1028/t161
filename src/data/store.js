@@ -19,9 +19,20 @@ function mapElder(r) {
   if (!r) return null;
   return { id: r.id, code: r.code, name: r.name, gender: r.gender, age: r.age, phone: r.phone, subsidyLevel: r.subsidy_level, identities: r.identities, dietary: r.dietary, canteenId: r.canteen_id, status: r.status, createdAt: r.created_at, updatedAt: r.updated_at };
 }
+function _toDateStr(v) {
+  if (!v) return '';
+  if (typeof v === 'string') return v.length >= 10 ? v.slice(0, 10) : v;
+  if (v instanceof Date) {
+    const y = v.getFullYear();
+    const m = String(v.getMonth() + 1).padStart(2, '0');
+    const d = String(v.getDate()).padStart(2, '0');
+    return `${y}-${m}-${d}`;
+  }
+  return String(v).slice(0, 10);
+}
 function mapMeal(r) {
   if (!r) return null;
-  return { id: r.id, canteenId: r.canteen_id, serveDate: r.serve_date, mealType: r.meal_type, dishName: r.dish_name, priceCents: r.price_cents, status: r.status, createdAt: r.created_at, updatedAt: r.updated_at };
+  return { id: r.id, canteenId: r.canteen_id, serveDate: _toDateStr(r.serve_date), mealType: r.meal_type, dishName: r.dish_name, priceCents: r.price_cents, status: r.status, createdAt: r.created_at, updatedAt: r.updated_at };
 }
 function mapOrder(r) {
   if (!r) return null;
@@ -219,14 +230,14 @@ async function upsertMonthlySubsidyUsage(elderId, month, deltaCents, capCents) {
 }
 
 /* ----------------------------- 带关联的订单查询（用于结算） ----------------------------- */
-async function listOrdersWithDetails({ elderId, month, canteenId, status } = {}) {
+async function listOrdersWithDetails({ elderId, month, canteenId, status, includeCancelled = true } = {}) {
   const w = []; const p = [];
-  w.push('o.status != ?'); p.push('CANCELLED');
+  if (!includeCancelled) { w.push('o.status != ?'); p.push('CANCELLED'); }
   if (elderId !== undefined) { w.push('o.elder_id=?'); p.push(elderId); }
   if (canteenId !== undefined) { w.push('m.canteen_id=?'); p.push(canteenId); }
   if (status) { w.push('o.status=?'); p.push(status); }
   if (month) { w.push('DATE_FORMAT(m.serve_date, "%Y-%m")=?'); p.push(month); }
-  const c = `WHERE ${w.join(' AND ')}`;
+  const c = w.length ? `WHERE ${w.join(' AND ')}` : '';
   const sql = `SELECT o.*, m.serve_date, m.meal_type, m.price_cents AS meal_price, m.canteen_id, e.subsidy_level, e.identities
     FROM orders o
     INNER JOIN meals m ON o.meal_id = m.id
@@ -238,7 +249,7 @@ async function listOrdersWithDetails({ elderId, month, canteenId, status } = {})
     id: row.id, elderId: row.elder_id, mealId: row.meal_id, diningType: row.dining_type,
     qty: row.qty, amountCents: row.amount_cents, subsidyCents: row.subsidy_cents,
     payCents: row.pay_cents, status: row.status, createdAt: row.created_at,
-    serveDate: row.serve_date, mealType: row.meal_type, mealPriceCents: row.meal_price,
+    serveDate: _toDateStr(row.serve_date), mealType: row.meal_type, mealPriceCents: row.meal_price,
     canteenId: row.canteen_id, subsidyLevel: row.subsidy_level, identities: row.identities,
   }));
 }
@@ -318,9 +329,48 @@ async function isMonthLocked(month) {
   return !!lock;
 }
 
+/* ----------------------------- 节假日 ----------------------------- */
+function mapHoliday(r) {
+  if (!r) return null;
+  return { id: r.id, holidayDate: _toDateStr(r.holiday_date), name: r.name, createdAt: r.created_at };
+}
+async function listHolidays({ year, month, from, to } = {}) {
+  const w = []; const p = [];
+  if (from) { w.push('holiday_date >= ?'); p.push(from); }
+  if (to) { w.push('holiday_date <= ?'); p.push(to); }
+  if (year) { w.push('YEAR(holiday_date) = ?'); p.push(Number(year)); }
+  if (month) { w.push('DATE_FORMAT(holiday_date, "%Y-%m") = ?'); p.push(month); }
+  const c = w.length ? `WHERE ${w.join(' AND ')}` : '';
+  const [r] = await getPool().query(`SELECT * FROM holidays ${c} ORDER BY holiday_date ASC`, p);
+  return r.map(mapHoliday);
+}
+async function listHolidayDatesByMonth(month) {
+  const rows = await listHolidays({ month });
+  return rows.map((h) => h.holidayDate);
+}
+async function getHolidayByDate(date) {
+  const d = _toDateStr(date);
+  const [r] = await getPool().query('SELECT * FROM holidays WHERE holiday_date = ?', [d]);
+  return mapHoliday(r[0]);
+}
+async function createHoliday({ holidayDate, name = '' }) {
+  const d = _toDateStr(holidayDate);
+  const [x] = await getPool().query('INSERT INTO holidays (holiday_date, name) VALUES (?, ?)', [d, name]);
+  return getHolidayByDate(d);
+}
+async function deleteHoliday(id) {
+  const [x] = await getPool().query('DELETE FROM holidays WHERE id = ?', [Number(id)]);
+  return x.affectedRows > 0;
+}
+async function deleteHolidayByDate(date) {
+  const d = _toDateStr(date);
+  const [x] = await getPool().query('DELETE FROM holidays WHERE holiday_date = ?', [d]);
+  return x.affectedRows > 0;
+}
+
 module.exports = {
   mapUser, mapCanteen, mapElder, mapMeal, mapOrder,
-  mapSubsidyRule, mapOrderSubsidyDetail, mapMonthlySubsidyUsage, mapSettlementSheet, mapSettlementDiscrepancy, mapMonthlySettlementLock,
+  mapSubsidyRule, mapOrderSubsidyDetail, mapMonthlySubsidyUsage, mapSettlementSheet, mapSettlementDiscrepancy, mapMonthlySettlementLock, mapHoliday,
   getUserByUsername, getUserById, listUsers, createUser, updateUser, deleteUser, countUsers,
   listCanteens, getCanteenById, getCanteenByCode, createCanteen, updateCanteen, deleteCanteen,
   listElders, getElderById, getElderByCode, createElder, updateElder, deleteElder,
@@ -332,4 +382,5 @@ module.exports = {
   listSettlementSheets, getSettlementSheetById, createSettlementSheet, updateSettlementSheet, deleteSettlementSheetsByMonth,
   listSettlementDiscrepancies, createSettlementDiscrepancy, resolveSettlementDiscrepancy,
   getMonthlySettlementLock, listMonthlySettlementLocks, lockMonthSettlement, isMonthLocked,
+  listHolidays, listHolidayDatesByMonth, getHolidayByDate, createHoliday, deleteHoliday, deleteHolidayByDate,
 };

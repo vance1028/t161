@@ -175,3 +175,11 @@ CREATE TABLE IF NOT EXISTS monthly_settlement_locks (
   remark      VARCHAR(255) NOT NULL DEFAULT '',
   CONSTRAINT fk_lock_user FOREIGN KEY (locked_by) REFERENCES users(id) ON DELETE RESTRICT
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- 节假日（统一数据来源，补贴结算自动读取）
+CREATE TABLE IF NOT EXISTS holidays (
+  id          INT UNSIGNED PRIMARY KEY AUTO_INCREMENT,
+  holiday_date DATE NOT NULL UNIQUE,
+  name        VARCHAR(64) NOT NULL DEFAULT '',
+  created_at  DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

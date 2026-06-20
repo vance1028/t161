@@ -7,6 +7,19 @@ async function seedSubsidyRules() {
   const effectiveFrom = `${today.getFullYear()}-01-01`;
 
   await store.createSubsidyRule({
+    code: 'CAP-A', name: 'A级月度封顶300元', ruleType: 'MONTHLY_CAP', priority: 5,
+    conditionJson: { level: 'A' }, amountCents: 30000, effectiveFrom,
+  });
+  await store.createSubsidyRule({
+    code: 'CAP-B', name: 'B级月度封顶200元', ruleType: 'MONTHLY_CAP', priority: 5,
+    conditionJson: { level: 'B' }, amountCents: 20000, effectiveFrom,
+  });
+  await store.createSubsidyRule({
+    code: 'CAP-C', name: 'C级月度封顶100元', ruleType: 'MONTHLY_CAP', priority: 5,
+    conditionJson: { level: 'C' }, amountCents: 10000, effectiveFrom,
+  });
+
+  await store.createSubsidyRule({
     code: 'LVL-A-BASE', name: 'A级基础补贴', ruleType: 'LEVEL_BASE', priority: 10,
     conditionJson: { level: 'A' }, amountCents: 600, effectiveFrom,
   });
@@ -51,6 +64,24 @@ async function seedSubsidyRules() {
   });
 }
 
+async function seedHolidays() {
+  const holidays = [
+    { holidayDate: '2026-01-01', name: '元旦' },
+    { holidayDate: '2026-06-19', name: '端午节' },
+    { holidayDate: '2026-09-25', name: '中秋节' },
+    { holidayDate: '2026-10-01', name: '国庆节' },
+    { holidayDate: '2026-10-02', name: '国庆节' },
+    { holidayDate: '2026-10-03', name: '国庆节' },
+    { holidayDate: '2026-10-04', name: '国庆节' },
+    { holidayDate: '2026-10-05', name: '国庆节' },
+    { holidayDate: '2026-10-06', name: '国庆节' },
+    { holidayDate: '2026-10-07', name: '国庆节' },
+  ];
+  for (const h of holidays) {
+    try { await store.createHoliday(h); } catch (e) { /* 忽略唯一约束冲突 */ }
+  }
+}
+
 /**
  * 种子数据：管理员/食堂工作人员/观察员各一个账号，
  * 外加若干助餐点、长者、餐次与订餐，以及完整的补贴规则体系，
@@ -77,12 +108,13 @@ async function seed() {
   await store.createMeal({ canteenId: c2.id, serveDate: '2026-06-18', mealType: 'LUNCH', dishName: '香菇鸡肉饭', priceCents: 1300, status: 'PUBLISHED' });
 
   await seedSubsidyRules();
+  await seedHolidays();
 
   const o1 = await store.createOrder({ elderId: e1.id, mealId: m1.id, diningType: 'DINE_IN', qty: 1, amountCents: 1500, subsidyCents: 900, payCents: 600, status: 'RESERVED' });
   await store.updateOrder(o1.id, { status: 'SERVED' });
   await store.createOrder({ elderId: e2.id, mealId: m2.id, diningType: 'DELIVERY', qty: 1, amountCents: 1200, subsidyCents: 600, payCents: 600, status: 'RESERVED' });
 
-  return { skipped: false, users: 3, canteens: 3, elders: 3, meals: 3, subsidyRules: 9, orders: 2 };
+  return { skipped: false, users: 3, canteens: 3, elders: 3, meals: 3, subsidyRules: 12, holidays: 10, orders: 2 };
 }
 
 if (require.main === module) {

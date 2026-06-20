@@ -47,6 +47,7 @@ async function resetAll() {
       'monthly_subsidy_usage',
       'orders',
       'subsidy_rules',
+      'holidays',
       'meals',
       'elders',
       'canteens',
