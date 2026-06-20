@@ -97,7 +97,6 @@ router.post('/generate', requireRole('ADMIN', 'OPERATOR'), async (req, res, next
 
     await store.deleteSettlementSheetsByMonth(month);
 
-    const summarySheetType = 'SUMMARY';
     const byCanteen = aggregateSettlementByGroup(ctx.orders, (o) => `CANTEEN_${o.canteenId}`);
     const byLevel = aggregateSettlementByGroup(ctx.orders, (o) => `LEVEL_${o.subsidyLevel || 'C'}`);
     const byIdentity = aggregateSettlementByGroup(ctx.orders, (o) => {
@@ -105,7 +104,6 @@ router.post('/generate', requireRole('ADMIN', 'OPERATOR'), async (req, res, next
       return `ID_${identities.length > 0 ? identities.join('|') : 'NONE'}`;
     });
 
-    const results = [];
     const snapshot = {
       rules: ctx.rules,
       capRules: ctx.capRules,
@@ -114,6 +112,28 @@ router.post('/generate', requireRole('ADMIN', 'OPERATOR'), async (req, res, next
     };
 
     let totalSubsidy = 0, totalPay = 0, totalAmount = 0, totalCount = 0;
+    for (const [, agg] of byCanteen) {
+      totalSubsidy += agg.totalSubsidyCents;
+      totalPay += agg.totalPayCents;
+      totalAmount += agg.totalAmountCents;
+      totalCount += agg.orderCount;
+    }
+
+    // 总单：SUMMARY 类型，承载所有差异记录
+    const summarySheet = await store.createSettlementSheet({
+      month,
+      sheetType: 'SUMMARY',
+      groupKey: 'summary',
+      groupValue: '月度汇总',
+      orderCount: totalCount,
+      totalAmountCents: totalAmount,
+      totalSubsidyCents: totalSubsidy,
+      totalPayCents: totalPay,
+      status: 'DRAFT',
+      snapshotRules: snapshot,
+    });
+
+    const detailSheets = [];
 
     for (const [key, agg] of byCanteen) {
       const cidMatch = key.match(/^CANTEEN_(\d+)$/);
@@ -132,11 +152,7 @@ router.post('/generate', requireRole('ADMIN', 'OPERATOR'), async (req, res, next
         status: 'DRAFT',
         snapshotRules: snapshot,
       });
-      totalSubsidy += agg.totalSubsidyCents;
-      totalPay += agg.totalPayCents;
-      totalAmount += agg.totalAmountCents;
-      totalCount += agg.orderCount;
-      results.push(sheet);
+      detailSheets.push(sheet);
     }
 
     for (const [key, agg] of byLevel) {
@@ -153,7 +169,7 @@ router.post('/generate', requireRole('ADMIN', 'OPERATOR'), async (req, res, next
         status: 'DRAFT',
         snapshotRules: snapshot,
       });
-      results.push(sheet);
+      detailSheets.push(sheet);
     }
 
     for (const [key, agg] of byIdentity) {
@@ -170,8 +186,10 @@ router.post('/generate', requireRole('ADMIN', 'OPERATOR'), async (req, res, next
         status: 'DRAFT',
         snapshotRules: snapshot,
       });
-      results.push(sheet);
+      detailSheets.push(sheet);
     }
+
+    const allSheets = [summarySheet, ...detailSheets];
 
     const discrepancyMap = new Map();
     for (const d of discrepancies) {
@@ -179,26 +197,24 @@ router.post('/generate', requireRole('ADMIN', 'OPERATOR'), async (req, res, next
       discrepancyMap.get(d.issueType).push(d);
     }
 
-    if (discrepancies.length > 0) {
-      const firstSettlement = results.find((s) => s.sheetType === 'BY_CANTEEN') || results[0];
-      if (firstSettlement) {
-        for (const d of discrepancies) {
-          await store.createSettlementDiscrepancy({
-            settlementId: firstSettlement.id,
-            orderId: d.orderId,
-            issueType: d.issueType,
-            expectedCents: d.expectedCents,
-            actualCents: d.actualCents,
-            diffCents: d.diffCents,
-            description: d.description,
-          });
-        }
-      }
+    // 差异记录统一挂在 SUMMARY 总单下
+    for (const d of discrepancies) {
+      await store.createSettlementDiscrepancy({
+        settlementId: summarySheet.id,
+        orderId: d.orderId,
+        issueType: d.issueType,
+        expectedCents: d.expectedCents,
+        actualCents: d.actualCents,
+        diffCents: d.diffCents,
+        description: d.description,
+      });
     }
 
     return sendData(res, 200, {
       month,
-      sheets: results,
+      summary: summarySheet,
+      sheets: allSheets,
+      detailSheetCount: detailSheets.length,
       discrepancyCount: discrepancies.length,
       discrepancyByType: Object.fromEntries(
         Array.from(discrepancyMap.entries()).map(([k, v]) => [k, v.length])
@@ -357,7 +373,14 @@ router.post('/:id/confirm', requireRole('ADMIN'), async (req, res, next) => {
     const s = await store.getSettlementSheetById(id);
     if (!s) return sendError(res, 404, '结算单不存在');
     if (await store.isMonthLocked(s.month)) return sendError(res, 409, '该月份已锁定');
-    return sendData(res, 200, await store.updateSettlementSheet(id, { status: 'CONFIRMED' }));
+    const updated = await store.updateSettlementSheet(id, { status: 'CONFIRMED' });
+
+    let lock = null;
+    // 确认 SUMMARY 总单后自动锁定整个月
+    if (s.sheetType === 'SUMMARY' && !(await store.isMonthLocked(s.month))) {
+      lock = await store.lockMonthSettlement(s.month, req.user.id, '结算单确认后自动锁定');
+    }
+    return sendData(res, 200, { ...updated, monthLocked: !!lock, lock: lock || null });
   } catch (e) { return next(e); }
 });
 

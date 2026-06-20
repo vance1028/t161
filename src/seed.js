@@ -1,6 +1,12 @@
 'use strict';
 
 const store = require('./data/store');
+const {
+  calculateOrderSubsidy,
+  extractCapRules,
+  toDateStr,
+  getMonthKey,
+} = require('./utils/subsidy-calculator');
 
 async function seedSubsidyRules() {
   const today = new Date();
@@ -110,11 +116,86 @@ async function seed() {
   await seedSubsidyRules();
   await seedHolidays();
 
-  const o1 = await store.createOrder({ elderId: e1.id, mealId: m1.id, diningType: 'DINE_IN', qty: 1, amountCents: 1500, subsidyCents: 900, payCents: 600, status: 'RESERVED' });
-  await store.updateOrder(o1.id, { status: 'SERVED' });
-  await store.createOrder({ elderId: e2.id, mealId: m2.id, diningType: 'DELIVERY', qty: 1, amountCents: 1200, subsidyCents: 600, payCents: 600, status: 'RESERVED' });
+  // 种子订单：用 calculator 动态计算补贴，确保和规则完全一致
+  const firstDay = '2026-01-01';
+  const rules = await store.listSubsidyRules({ status: 'ACTIVE', effectiveDate: firstDay });
+  const capRules = extractCapRules(rules);
+  const holidays = await store.listHolidayDatesByMonth('2026-06');
 
-  return { skipped: false, users: 3, canteens: 3, elders: 3, meals: 3, subsidyRules: 12, holidays: 10, orders: 2 };
+  const elders = [e1, e2];
+  const meals = [m1, m2];
+  const monthlyUsed = new Map();
+
+  let orderCount = 0;
+
+  // e1 订 m1 (A 级低保+失能 + 午餐)
+  {
+    const elder = e1;
+    const meal = m1;
+    const isHoliday = holidays.includes(toDateStr(meal.serveDate));
+    const monthKey = getMonthKey(meal.serveDate);
+    const usageKey = `${elder.id}-${monthKey}`;
+    const usedCents = monthlyUsed.get(usageKey) || 0;
+    const capCents = Number(capRules[elder.subsidyLevel] || 0);
+    const calc = calculateOrderSubsidy({
+      elder, meal, qty: 1, rules, isHoliday,
+      monthlyUsedCents: usedCents, monthlyCapCents: capCents,
+      orderDate: meal.serveDate,
+    });
+    const o = await store.createOrder({
+      elderId: elder.id, mealId: meal.id, diningType: 'DINE_IN', qty: 1,
+      amountCents: calc.amountCents, subsidyCents: calc.netSubsidyCents,
+      payCents: calc.payCents, status: 'RESERVED',
+    });
+    for (const bd of calc.breakdown) {
+      if (!bd.ruleId) continue;
+      await store.createOrderSubsidyDetail({
+        orderId: o.id, ruleId: bd.ruleId, ruleCode: bd.ruleCode,
+        ruleName: bd.ruleName, ruleType: bd.ruleType, amountCents: bd.amountCents,
+      });
+    }
+    if (capCents > 0) {
+      await store.upsertMonthlySubsidyUsage(elder.id, monthKey, calc.netSubsidyCents, capCents);
+    }
+    monthlyUsed.set(usageKey, usedCents + calc.netSubsidyCents);
+    await store.updateOrder(o.id, { status: 'SERVED' });
+    orderCount++;
+  }
+
+  // e2 订 m2 (B 级高龄 + 晚餐)
+  {
+    const elder = e2;
+    const meal = m2;
+    const isHoliday = holidays.includes(toDateStr(meal.serveDate));
+    const monthKey = getMonthKey(meal.serveDate);
+    const usageKey = `${elder.id}-${monthKey}`;
+    const usedCents = monthlyUsed.get(usageKey) || 0;
+    const capCents = Number(capRules[elder.subsidyLevel] || 0);
+    const calc = calculateOrderSubsidy({
+      elder, meal, qty: 1, rules, isHoliday,
+      monthlyUsedCents: usedCents, monthlyCapCents: capCents,
+      orderDate: meal.serveDate,
+    });
+    const o = await store.createOrder({
+      elderId: elder.id, mealId: meal.id, diningType: 'DELIVERY', qty: 1,
+      amountCents: calc.amountCents, subsidyCents: calc.netSubsidyCents,
+      payCents: calc.payCents, status: 'RESERVED',
+    });
+    for (const bd of calc.breakdown) {
+      if (!bd.ruleId) continue;
+      await store.createOrderSubsidyDetail({
+        orderId: o.id, ruleId: bd.ruleId, ruleCode: bd.ruleCode,
+        ruleName: bd.ruleName, ruleType: bd.ruleType, amountCents: bd.amountCents,
+      });
+    }
+    if (capCents > 0) {
+      await store.upsertMonthlySubsidyUsage(elder.id, monthKey, calc.netSubsidyCents, capCents);
+    }
+    monthlyUsed.set(usageKey, usedCents + calc.netSubsidyCents);
+    orderCount++;
+  }
+
+  return { skipped: false, users: 3, canteens: 3, elders: 3, meals: 3, subsidyRules: 12, holidays: 10, orders: orderCount };
 }
 
 if (require.main === module) {
